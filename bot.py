@@ -1,11 +1,11 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import ui
 from discord.interactions import Interaction
 import requests
 import json
-from pymongo import MongoClient
 import os
+from pymongo import MongoClient
 
 # Discord Intents
 intents = discord.Intents.all()
@@ -16,11 +16,11 @@ client = MongoClient(os.environ["MONGO_TOKEN"])
 db = client['discord']
 collection = db['dev_steam']
 
-
-client = commands.Bot(intents=intents, command_prefix='!')
+# steam api 
+steam_api_key = os.environ["STEAM_TOKEN"]
 
 def has_wishlisted(steam_id):
-    steamLoginSecure = os.environ["STEAM_TOKEN"]
+    steamLoginSecure = os.environ["STEAM_CACHE_TOKEN"]
     devid = "2391300"
     testApi = f'https://store.steampowered.com/wishlist/profiles/{steam_id}/wishlistdata'
 
@@ -37,11 +37,12 @@ def has_wishlisted(steam_id):
 
 class PersistentViewBot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.default()
+        intents = discord.Intents.all()
         super().__init__(command_prefix=commands.when_mentioned_or('!'), intents=intents)
-
+    
     async def setup_hook(self) -> None:
         self.add_view(Menu())
+
 
 
 class SteamModal(discord.ui.Modal, title="Steam ID"):
@@ -50,7 +51,7 @@ class SteamModal(discord.ui.Modal, title="Steam ID"):
     async def on_submit(self, interaction: Interaction):
         steam_id = self.steam_id
         # Make a request to the Steam Web API to get the user's profile information
-        response = requests.get(f"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=CFBC5403952CC322EFCF72A2471C7AF1&steamids={steam_id}")
+        response = requests.get(f"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={steam_api_key}&steamids={steam_id}")
         data = response.json()
 
         # checking if steam account is already connected to discord
@@ -84,7 +85,7 @@ class SteamModal(discord.ui.Modal, title="Steam ID"):
         else:
             await interaction.response.send_message(content=f"No account found for {steam_id}",ephemeral=True)
 
-# client = PersistentViewBot()
+client = PersistentViewBot()
 
 class Menu(discord.ui.View):
     def __init__(self):
@@ -117,10 +118,39 @@ class Menu(discord.ui.View):
         await interaction.response.send_message("https://cdn.discordapp.com/attachments/1089783112004812832/1108703575623876608/Studio_Project_V1.gif", ephemeral=True)
 
 
-
 @client.command()
 async def menu(ctx):
     embed = discord.Embed(title="Connect with Steam", description="Click to connect to steam")
     await ctx.send(embed=embed, view=Menu())
+
+@client.event
+async def on_member_remove(member):
+    user = collection.find_one({"discordid": str(member.id)})
+    print(f"{user} left")
+    if user:
+        collection.delete_one({"discordid": str(member.id)})
+
+@tasks.loop(seconds=2400)  # Set the desired interval for the task
+async def check_wishlist_status():
+    print("cjecking")
+    cursor = collection.find({})
+    discord_ids = [user['discordid'] for user in cursor]
+    for discord_id in discord_ids:
+        user = collection.find_one({"discordid": discord_id})
+        steam_id = user['steamid']
+        if not has_wishlisted(steam_id):
+            guild_id = 1067860916722475058  # Replace with your guild ID
+            guild = client.get_guild(guild_id)
+            member = guild.get_member(int(discord_id))
+            if member:
+                role_id = 1108709170183671808  # Replace with your role ID
+                role = guild.get_role(role_id)
+                if role:
+                    await member.remove_roles(role)
+
+@client.event
+async def on_ready():
+    print(f"client is ready. Logged in as {client.user}")
+    check_wishlist_status.start()
 
 client.run(os.environ["DISCORD_TOKEN"])
